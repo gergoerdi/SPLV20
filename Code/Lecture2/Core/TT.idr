@@ -57,7 +57,7 @@ Show NameType where
 public export
 data IsVar : Name -> Nat -> List Name -> Type where
      First : IsVar n Z (n :: ns)
-     Later : IsVar n i ns -> IsVar n (S i) (m :: ns)
+     Later : (p : IsVar n i ns) -> IsVar n (S i) (m :: ns)
 
 public export
 dropVar : (ns : List Name) -> {idx : Nat} ->
@@ -121,39 +121,56 @@ data Term : List Name -> Type where
 
 -- Term manipulation
 
+Ren : List Name -> List Name -> Type
+Ren vars1 vars2 = Var vars1 -> Var vars2
+
 weakenVar : {inner : List Name} -> Var (inner ++ outer) -> Var (inner ++ [x] ++ outer)
 weakenVar {inner = []} (MkVar p) = MkVar (Later p)
 weakenVar {inner = (_::xs)} (MkVar First) = MkVar First
-weakenVar {inner = (_::xs)} {x = x} (MkVar (Later p)) with (weakenVar {x = x} (MkVar p))
-  weakenVar {inner = (_::xs)} {  x = x} (MkVar (Later p)) | (MkVar p') = MkVar (Later p')
+weakenVar {inner = (_::xs)} {x = x} (MkVar (Later p)) = case weakenVar {x=x} (MkVar p) of
+  MkVar p' => MkVar (Later p')
 
-weaken' : {inner : List Name} -> Term (inner ++ outer) -> Term (inner ++ [x] ++ outer)
-weaken' (Local idx p) with (weakenVar {inner = inner} {x = x} (MkVar p))
-  weaken' (Local idx p) | (MkVar p') = Local _ p'
-weaken' (Ref nt n) = Ref nt n
-weaken' (Meta n ts) = Meta n $ map weaken' ts
-weaken' (Bind n b scope) = Bind n (map weaken' b) (weaken' {inner = _ :: _} scope)
-weaken' (App f e) = App (weaken' f) (weaken' e)
-weaken' TType = TType
-weaken' Erased = Erased
+wkRen : Ren vars1 vars2 -> Ren (x::vars1) (x::vars2)
+wkRen ren (MkVar First) = MkVar First
+wkRen ren (MkVar (Later p)) = weakenVar {inner = []} $ ren (MkVar p)
+
+rename : Ren vars1 vars2 -> Term vars1 -> Term vars2
+rename ren (Local idx p) = case ren (MkVar p) of MkVar p' => Local _ p'
+rename ren (Ref nt x) = Ref nt x
+rename ren (Meta x ts) = Meta x $ map (rename ren) ts
+rename ren (Bind x b scope) = Bind x (map (rename ren) b) (rename (wkRen ren) scope)
+rename ren (App f e) = App (rename ren f) (rename ren e)
+rename ren TType = TType
+rename ren Erased = Erased
 
 export
 weaken : Term vars -> Term (x :: vars)
-weaken = weaken' {inner = []}
+weaken = rename $ \(MkVar p) => MkVar (Later p)
 
-embedIsVar : IsVar name idx vars -> IsVar name idx (vars ++ more)
-embedIsVar First = First
-embedIsVar (Later p) = Later $ embedIsVar p
+Sub : List Name -> List Name -> Type
+Sub vars1 vars2 = Var vars1 -> Term vars2
+
+wkSub : Sub vars1 vars2 -> Sub (x::vars1) (x::vars2)
+wkSub sub (MkVar First) = Local _ First
+wkSub sub (MkVar (Later p)) = weaken (sub (MkVar p))
+
+substAll : (Sub vars1 vars2) -> Term vars1 -> Term vars2
+substAll sub (Local idx p) = sub (MkVar p)
+substAll sub (Ref nt x) = Ref nt x
+substAll sub (Meta x ts) = Meta x (map (substAll sub) ts)
+substAll sub (Bind x b scope) = Bind x (map (substAll sub) b) (substAll (wkSub sub) scope)
+substAll sub (App f e) = App (substAll sub f) (substAll sub e)
+substAll sub TType = TType
+substAll sub Erased = Erased
 
 export
 embed : Term vars -> Term (vars ++ more)
-embed (Local idx p) = Local idx $ embedIsVar p
-embed (Ref nt x) = Ref nt x
-embed (Meta x ts) = Meta x $ map embed ts
-embed (Bind x b scope) = Bind x (map embed b) (embed scope)
-embed (App f e) = App (embed f) (embed e)
-embed TType = TType
-embed Erased = Erased
+embed = substAll $ \v => case ren v of MkVar p => Local _ p
+  where
+    ren : {0 vars : List Name} -> Var vars -> Var (vars ++ more)
+    ren (MkVar First) = MkVar First
+    ren (MkVar (Later p)) with (ren (MkVar p))
+      ren (MkVar (Later p)) | (MkVar p') = MkVar $ Later p'
 
 contractVar : {inner : List Name} -> Var (inner ++ [x] ++ outer) -> Maybe (Var (inner ++ outer))
 contractVar {inner = []} (MkVar First) = Nothing
@@ -178,20 +195,11 @@ export
 contract : Term (x :: vars) -> Maybe (Term vars)
 contract = contract' {inner = []}
 
-subst' : {inner : List Name} -> Term (inner ++ outer) -> Term (inner ++ [x] ++ outer) -> Term (inner ++ outer)
-subst' e0 (Local idx p) = case contractVar (MkVar p) of
-    Nothing => e0
-    Just (MkVar p') => Local _ p'
-subst' e0 (Ref nt x) = Ref nt x
-subst' e0 (Meta x ts) = Meta x $ map (subst' e0) ts
-subst' {inner} e0 (Bind x b scope) = Bind x (map (subst' e0) b) (subst' {inner = _ :: _} (weaken e0) scope)
-subst' e0 (App f e) = App (subst' e0 f) (subst' e0 e)
-subst' e0 TType = TType
-subst' e0 Erased = Erased
-
 export
 subst : Term vars -> Term (x :: vars) -> Term vars
-subst = subst' {inner = []}
+subst t0 = substAll $ \v => case v of
+ MkVar First => t0
+ MkVar (Later p) => Local _ p
 
 public export
 data CompatibleVars : List Name -> List Name -> Type where
@@ -206,14 +214,10 @@ renameVar (CompatExt c) (MkVar (Later p)) with (renameVar c (MkVar p))
 
 export
 renameVars : CompatibleVars xs ys -> Term xs -> Term ys
-renameVars c (Local idx p) with (renameVar c (MkVar p))
-  renameVars c (Local idx p) | (MkVar p') = Local _ p'
-renameVars c (Ref nt x) = Ref nt x
-renameVars c (Meta x ts) = Meta x $ map (renameVars c) ts
-renameVars c (Bind x b scope) = Bind x (map (renameVars c) b) (renameVars (CompatExt c) scope)
-renameVars c (App f e) = App (renameVars c f) (renameVars c e)
-renameVars c TType = TType
-renameVars c Erased = Erased
+renameVars c = substAll sub
+  where
+    sub : Sub xs ys
+    sub v = case renameVar c v of MkVar p => Local _ p
 
 --- Show instances
 
