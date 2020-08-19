@@ -185,6 +185,31 @@ traverseTerm go (App f e) = App <$> traverseTerm go f <*> traverseTerm go e
 traverseTerm go TType = pure TType
 traverseTerm go Erased = pure Erased
 
+public export
+interface RFunctor (v : k -> Type) (t : k -> Type) where
+  rmap : (v a -> v b) -> t a -> t b
+
+public export
+interface (RFunctor v t) => RMonad (v : k -> Type) (t : k -> Type) where
+  rpure : v a -> t a
+  rbind : (v a -> t b) -> t a -> t b
+
+interface RTraversable (v : k -> Type) (t : k -> Type) where
+  rtraverse : (Applicative f) => (v a -> f (t b)) -> (t a -> f (t b))
+
+export
+RFunctor Var Term where
+  rmap = rename
+
+export
+RMonad Var Term where
+  rpure (MkVar p) = Local _ p
+  rbind = substAll
+
+export
+RTraversable Var Term where
+  rtraverse = traverseTerm
+
 contractVar : {inner : List Name} -> Var (inner ++ [x] ++ outer) -> Maybe (Var (inner ++ outer))
 contractVar {inner = []} (MkVar First) = Nothing
 contractVar {inner = []} (MkVar (Later p)) = pure $ MkVar p
