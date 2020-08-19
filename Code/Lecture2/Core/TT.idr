@@ -172,6 +172,19 @@ embed = substAll $ \v => case ren v of MkVar p => Local _ p
     ren (MkVar (Later p)) with (ren (MkVar p))
       ren (MkVar (Later p)) | (MkVar p') = MkVar $ Later p'
 
+traverseTerm : (Applicative f) => (Var vars1 -> f (Term vars2)) -> (Term vars1 -> f (Term vars2))
+traverseTerm go (Local idx p) = go (MkVar p)
+traverseTerm go (Ref nt x) = pure $ Ref nt x
+traverseTerm go (Meta x ts) = Meta x <$> traverse (traverseTerm go) ts
+traverseTerm go (Bind x b scope) = Bind x <$> traverse (traverseTerm go) b <*> traverseTerm go' scope
+  where
+    go' : Var (x :: vars1) -> f (Term (x :: vars2))
+    go' (MkVar First) = pure $ Local _ First
+    go' (MkVar (Later p)) = weaken <$> go (MkVar p)
+traverseTerm go (App f e) = App <$> traverseTerm go f <*> traverseTerm go e
+traverseTerm go TType = pure TType
+traverseTerm go Erased = pure Erased
+
 contractVar : {inner : List Name} -> Var (inner ++ [x] ++ outer) -> Maybe (Var (inner ++ outer))
 contractVar {inner = []} (MkVar First) = Nothing
 contractVar {inner = []} (MkVar (Later p)) = pure $ MkVar p
@@ -180,20 +193,11 @@ contractVar {inner = (x::xs)} (MkVar (Later p)) = do
     MkVar p' <- contractVar {inner = xs} (MkVar p)
     pure $ MkVar (Later p')
 
-contract' : {inner : List Name} -> Term (inner ++ [x] ++ outer) -> Maybe (Term (inner ++ outer))
-contract' (Local idx p) = do
-    MkVar p' <- contractVar (MkVar p)
-    pure $ Local _ p'
-contract' (Ref nt x) = pure $ Ref nt x
-contract' (Meta x ts) = Meta x <$> traverse contract' ts
-contract' (Bind x b scope) = Bind x <$> traverse contract' b <*> contract' {inner = _ :: _} scope
-contract' (App f e) = App <$> contract' f <*> contract' e
-contract' TType = pure TType
-contract' Erased = pure Erased
-
 export
 contract : Term (x :: vars) -> Maybe (Term vars)
-contract = contract' {inner = []}
+contract = traverseTerm $ \v => do
+  MkVar p <- contractVar {inner = []} v
+  pure $ Local _ p
 
 export
 subst : Term vars -> Term (x :: vars) -> Term vars
