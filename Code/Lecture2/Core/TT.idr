@@ -62,6 +62,9 @@ data IsVar : Name -> Nat -> List Name -> Type where
 public export
 dropVar : (ns : List Name) -> {idx : Nat} ->
           (0 p : IsVar name idx ns) -> List Name
+dropVar [] p = []
+dropVar (n :: ns) First = ns
+dropVar (n :: ns) (Later p) = dropVar ns p
 
 public export
 data Var : List Name -> Type where
@@ -82,47 +85,135 @@ data Binder : Type -> Type where
 
 export
 Functor Binder where
-  map func (Lam x ty) = Lam x (func ty)
-  map func (Pi x ty) = Pi x (func ty)
+  map func (Lam pi ty) = Lam pi (func ty)
+  map func (Pi pi ty) = Pi pi (func ty)
   map func (PVar ty) = PVar (func ty)
   map func (PVTy ty) = PVTy (func ty)
+
+export
+Foldable Binder where
+  foldr f s (Lam pi ty) = f ty s
+  foldr f s (Pi pi ty) = f ty s
+  foldr f s (PVar ty) = f ty s
+  foldr f s (PVTy ty) = f ty s
+
+export
+Traversable Binder where
+  traverse f (Lam pi ty) = Lam pi <$> f ty
+  traverse f (Pi pi ty) = Pi pi <$> f ty
+  traverse f (PVar ty) = PVar <$> f ty
+  traverse f (PVTy ty) = PVTy <$> f ty
 
 public export
 data Term : List Name -> Type where
      Local : (idx : Nat) -> -- de Bruijn index
              (0 p : IsVar name idx vars) -> -- proof that index is valid
              Term vars
-     Ref : NameType -> Name -> Term vars -- a reference to a global name
-     Meta : Name -> List (Term vars) -> Term vars
+     Ref : (nt : NameType) -> (x : Name) -> Term vars -- a reference to a global name
+     Meta : (x : Name) -> (ts : List (Term vars)) -> Term vars
      Bind : (x : Name) -> -- any binder, e.g. lambda or pi
-            Binder (Term vars) ->
+            (b : Binder (Term vars)) ->
             (scope : Term (x :: vars)) -> -- one more name in scope
             Term vars
-     App : Term vars -> Term vars -> Term vars -- function application
+     App : (f : Term vars) -> (e : Term vars) -> Term vars -- function application
      TType : Term vars
      Erased : Term vars
 
 -- Term manipulation
 
+weakenVar : {inner : List Name} -> Var (inner ++ outer) -> Var (inner ++ [x] ++ outer)
+weakenVar {inner = []} (MkVar p) = MkVar (Later p)
+weakenVar {inner = (_::xs)} (MkVar First) = MkVar First
+weakenVar {inner = (_::xs)} {x = x} (MkVar (Later p)) with (weakenVar {x = x} (MkVar p))
+  weakenVar {inner = (_::xs)} {  x = x} (MkVar (Later p)) | (MkVar p') = MkVar (Later p')
+
+weaken' : {inner : List Name} -> Term (inner ++ outer) -> Term (inner ++ [x] ++ outer)
+weaken' (Local idx p) with (weakenVar {inner = inner} {x = x} (MkVar p))
+  weaken' (Local idx p) | (MkVar p') = Local _ p'
+weaken' (Ref nt n) = Ref nt n
+weaken' (Meta n ts) = Meta n $ map weaken' ts
+weaken' (Bind n b scope) = Bind n (map weaken' b) (weaken' {inner = _ :: _} scope)
+weaken' (App f e) = App (weaken' f) (weaken' e)
+weaken' TType = TType
+weaken' Erased = Erased
+
 export
 weaken : Term vars -> Term (x :: vars)
+weaken = weaken' {inner = []}
+
+embedIsVar : IsVar name idx vars -> IsVar name idx (vars ++ more)
+embedIsVar First = First
+embedIsVar (Later p) = Later $ embedIsVar p
 
 export
 embed : Term vars -> Term (vars ++ more)
+embed (Local idx p) = Local idx $ embedIsVar p
+embed (Ref nt x) = Ref nt x
+embed (Meta x ts) = Meta x $ map embed ts
+embed (Bind x b scope) = Bind x (map embed b) (embed scope)
+embed (App f e) = App (embed f) (embed e)
+embed TType = TType
+embed Erased = Erased
+
+contractVar : {inner : List Name} -> Var (inner ++ [x] ++ outer) -> Maybe (Var (inner ++ outer))
+contractVar {inner = []} (MkVar First) = Nothing
+contractVar {inner = []} (MkVar (Later p)) = pure $ MkVar p
+contractVar {inner = (x::xs)} (MkVar First) = pure $ MkVar First
+contractVar {inner = (x::xs)} (MkVar (Later p)) = do
+    MkVar p' <- contractVar {inner = xs} (MkVar p)
+    pure $ MkVar (Later p')
+
+contract' : {inner : List Name} -> Term (inner ++ [x] ++ outer) -> Maybe (Term (inner ++ outer))
+contract' (Local idx p) = do
+    MkVar p' <- contractVar (MkVar p)
+    pure $ Local _ p'
+contract' (Ref nt x) = pure $ Ref nt x
+contract' (Meta x ts) = Meta x <$> traverse contract' ts
+contract' (Bind x b scope) = Bind x <$> traverse contract' b <*> contract' {inner = _ :: _} scope
+contract' (App f e) = App <$> contract' f <*> contract' e
+contract' TType = pure TType
+contract' Erased = pure Erased
 
 export
 contract : Term (x :: vars) -> Maybe (Term vars)
+contract = contract' {inner = []}
+
+subst' : {inner : List Name} -> Term (inner ++ outer) -> Term (inner ++ [x] ++ outer) -> Term (inner ++ outer)
+subst' e0 (Local idx p) = case contractVar (MkVar p) of
+    Nothing => e0
+    Just (MkVar p') => Local _ p'
+subst' e0 (Ref nt x) = Ref nt x
+subst' e0 (Meta x ts) = Meta x $ map (subst' e0) ts
+subst' {inner} e0 (Bind x b scope) = Bind x (map (subst' e0) b) (subst' {inner = _ :: _} (weaken e0) scope)
+subst' e0 (App f e) = App (subst' e0 f) (subst' e0 e)
+subst' e0 TType = TType
+subst' e0 Erased = Erased
 
 export
 subst : Term vars -> Term (x :: vars) -> Term vars
+subst = subst' {inner = []}
 
 public export
 data CompatibleVars : List Name -> List Name -> Type where
      CompatPre : CompatibleVars xs xs
      CompatExt : CompatibleVars xs ys -> CompatibleVars (n :: xs) (m :: ys)
 
+renameVar : CompatibleVars xs ys -> Var xs -> Var ys
+renameVar CompatPre v = v
+renameVar (CompatExt c) (MkVar First) = MkVar First
+renameVar (CompatExt c) (MkVar (Later p)) with (renameVar c (MkVar p))
+  renameVar (CompatExt c) (MkVar (Later p)) | (MkVar p') = MkVar (Later p')
+
 export
 renameVars : CompatibleVars xs ys -> Term xs -> Term ys
+renameVars c (Local idx p) with (renameVar c (MkVar p))
+  renameVars c (Local idx p) | (MkVar p') = Local _ p'
+renameVars c (Ref nt x) = Ref nt x
+renameVars c (Meta x ts) = Meta x $ map (renameVars c) ts
+renameVars c (Bind x b scope) = Bind x (map (renameVars c) b) (renameVars (CompatExt c) scope)
+renameVars c (App f e) = App (renameVars c f) (renameVars c e)
+renameVars c TType = TType
+renameVars c Erased = Erased
 
 --- Show instances
 
@@ -152,7 +243,7 @@ nameAt : {vars : _} ->
 nameAt {vars = n :: ns} Z First = n
 nameAt {vars = n :: ns} (S k) (Later p) = nameAt k p
 
-export 
+export
 {vars : _} -> Show (Term vars) where
   show tm = let (fn, args) = getFnArgs tm in showApp fn args
     where
