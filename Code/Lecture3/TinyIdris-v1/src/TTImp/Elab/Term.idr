@@ -61,7 +61,8 @@ checkTerm env (IPi p mn argTy retTy) exp
          (argTytm, gargTyty) <- checkTerm env argTy (Just gType)
          let env' : Env Term (n :: vars)
                   = Pi p argTytm :: env
-         ?finishIPi
+         (retTytm, gretTyty) <- checkTerm env' retTy (Just gType)
+         checkExp env (Bind n (Pi p argTytm) retTytm) gType exp
 checkTerm env (ILam p mn argTy scope) (Just exp)
     = do let n = fromMaybe (MN "_" 0) mn
          (argTytm, gargTyty) <- checkTerm env argTy (Just gType)
@@ -70,13 +71,22 @@ checkTerm env (ILam p mn argTy scope) (Just exp)
          expTyNF <- getNF exp
          defs <- get Ctxt
          case !(quote defs env expTyNF) of
-              Bind n' (Pi _ ty) sc =>
-                 -- Problem here: n' isn't necessarily the same as n
-                 -- Is there anything in Core.TT that might help?
-                 ?finishILam
+              Bind n' (Pi _ ty) sc => do
+                 let sc' = renameTop n sc
+                 (scopeTm, gscopeTmty) <- checkTerm env' scope (Just $ gnf env' sc')
+                 checkExp env (Bind n (Lam p argTytm) scopeTm) (gnf env $ Bind n (Pi p ty) !(getTerm gscopeTmty)) (Just exp)
               _ => throw (GenericMsg "Lambda must have a function type")
 checkTerm env (ILam p mn argTy scope) Nothing
-    = ?todo_infer_lam
+    = do let n = fromMaybe (MN "_" 0) mn
+         (argTytm, gargTyty) <- checkTerm env argTy (Just gType)
+         let env' : Env Term (n :: vars)
+                  = Lam p argTytm :: env
+         (scopeTm, gscopeTmty) <- checkTerm env' scope Nothing
+         scopeTytm <- getTerm gscopeTmty
+         checkExp env
+             (Bind n (Lam p argTytm) scopeTm)
+             (gnf env $ Bind n (Pi p argTytm) !(getTerm gscopeTmty))
+             Nothing
 checkTerm env (IPatvar n ty scope) exp
     = do (ty, gTyty) <- checkTerm env ty (Just gType)
          let env' : Env Term (n :: vars)
