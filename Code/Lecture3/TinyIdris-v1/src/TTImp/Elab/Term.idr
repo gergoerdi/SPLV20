@@ -37,16 +37,20 @@ checkTerm : {vars : _} ->
             {auto c : Ref Ctxt Defs} ->
             Env Term vars -> RawImp -> Maybe (Glued vars) ->
             Core (Term vars, Glued vars)
+
+checkTerm' : {vars : _} ->
+            {auto c : Ref Ctxt Defs} ->
+            Env Term vars -> RawImp -> Maybe (Glued vars) ->
+            Core (Term vars, Glued vars)
+
 -- If the n exists in 'env', that's its type.
 -- Otherwise, if it exists in the Defs, that's its type.
 -- Otherwise, it's undefined.
-checkTerm env (IVar n) exp
+checkTerm' env (IVar n) exp
     = case defined n env of
            Just (MkIsDefined p) =>
                let binder = getBinder p env in
-                   checkExp env (Local _ p)
-                                (gnf env (binderType binder))
-                                exp
+                   pure (Local _ p, gnf env (binderType binder))
            Nothing =>
              do defs <- get Ctxt
                 Just gdef <- lookupDef n defs
@@ -55,15 +59,15 @@ checkTerm env (IVar n) exp
                               DCon t a => DataCon t a
                               TCon t a => TyCon t a
                               _ => Func
-                checkExp env (Ref nt n) (gnf env (embed (type gdef))) exp
-checkTerm env (IPi p mn argTy retTy) exp
+                pure (Ref nt n, gnf env (embed (type gdef)))
+checkTerm' env (IPi p mn argTy retTy) exp
     = do let n = fromMaybe (MN "_" 0) mn
          (argTytm, gargTyty) <- checkTerm env argTy (Just gType)
          let env' : Env Term (n :: vars)
                   = Pi p argTytm :: env
          (retTytm, gretTyty) <- checkTerm env' retTy (Just gType)
-         checkExp env (Bind n (Pi p argTytm) retTytm) gType exp
-checkTerm env (ILam p mn argTy scope) (Just exp)
+         pure (Bind n (Pi p argTytm) retTytm, gType)
+checkTerm' env (ILam p mn argTy scope) (Just exp)
     = do let n = fromMaybe (MN "_" 0) mn
          (argTytm, gargTyty) <- checkTerm env argTy (Just gType)
          let env' : Env Term (n :: vars)
@@ -74,28 +78,23 @@ checkTerm env (ILam p mn argTy scope) (Just exp)
               Bind n' (Pi _ ty) sc => do
                  let sc' = renameTop n sc
                  (scopeTm, gscopeTmty) <- checkTerm env' scope (Just $ gnf env' sc')
-                 checkExp env (Bind n (Lam p argTytm) scopeTm) (gnf env $ Bind n (Pi p ty) !(getTerm gscopeTmty)) (Just exp)
+                 pure (Bind n (Lam p argTytm) scopeTm, gnf env $ Bind n (Pi p ty) !(getTerm gscopeTmty))
               _ => throw (GenericMsg "Lambda must have a function type")
-checkTerm env (ILam p mn argTy scope) Nothing
+checkTerm' env (ILam p mn argTy scope) Nothing
     = do let n = fromMaybe (MN "_" 0) mn
          (argTytm, gargTyty) <- checkTerm env argTy (Just gType)
          let env' : Env Term (n :: vars)
                   = Lam p argTytm :: env
          (scopeTm, gscopeTmty) <- checkTerm env' scope Nothing
          scopeTytm <- getTerm gscopeTmty
-         checkExp env
-             (Bind n (Lam p argTytm) scopeTm)
-             (gnf env $ Bind n (Pi p argTytm) !(getTerm gscopeTmty))
-             Nothing
-checkTerm env (IPatvar n ty scope) exp
+         pure (Bind n (Lam p argTytm) scopeTm, gnf env $ Bind n (Pi p argTytm) !(getTerm gscopeTmty))
+checkTerm' env (IPatvar n ty scope) exp
     = do (ty, gTyty) <- checkTerm env ty (Just gType)
          let env' : Env Term (n :: vars)
                   = PVar ty :: env
          (scopetm, gscopety) <- checkTerm env' scope Nothing
-         checkExp env (Bind n (PVar ty) scopetm)
-                      (gnf env (Bind n (PVTy ty) !(getTerm gscopety)))
-                      exp
-checkTerm env (IApp f a) exp
+         pure (Bind n (PVar ty) scopetm, gnf env (Bind n (PVTy ty) !(getTerm gscopety)))
+checkTerm' env (IApp f a) exp
     = do -- Get the function type (we don't have an expected type)
          (ftm, gfty) <- checkTerm env f Nothing
          fty <- getNF gfty
@@ -111,7 +110,11 @@ checkTerm env (IApp f a) exp
                        -- Calculate the type of the application by continuing
                        -- to evaluate the scope with 'atm'
                        sc' <- sc defs (toClosure env atm)
-                       checkExp env (App ftm atm) (glueBack defs env sc') exp
+                       pure (App ftm atm, glueBack defs env sc')
               _ => throw (GenericMsg "Not a function type")
-checkTerm env Implicit exp = ?todo_in_part_2
-checkTerm env IType exp = checkExp env TType gType exp
+checkTerm' env Implicit exp = ?todo_in_part_2
+checkTerm' env IType exp = pure (TType, gType)
+
+checkTerm env tti exp = do
+  (tm, gty) <- checkTerm' env tti exp
+  checkExp env tm gty exp
